@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Dream Engine: prompt-conditioned world synthesis</title>
+<style>
+  :root{
+    --ink:#1a1a1a; --muted:#666; --line:#e2e2e2; --accent:#2547c4;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:#fdfdfb; color:var(--ink);
+    font-family:Georgia,'Times New Roman',serif; line-height:1.55;
+  }
+  .page{max-width:760px;margin:0 auto;padding:2.5rem 1.25rem 4rem}
+  header{text-align:center;margin-bottom:1.5rem}
+  h1{font-size:2.1rem;margin:0 0 .4rem;font-weight:normal;letter-spacing:.01em}
+  .subtitle{font-size:1.05rem;color:var(--muted);margin:0 0 .8rem;font-style:italic}
+  .authors{font-size:.9rem;color:var(--muted);margin:0}
+  .authors sup{font-size:.7rem}
+  h2{font-size:1.15rem;margin:2.2rem 0 .6rem;border-bottom:1px solid var(--line);padding-bottom:.3rem;font-weight:normal;letter-spacing:.02em}
+  p{margin:.5rem 0}
+  .affil{font-size:.85rem;color:var(--muted)}
+  #stage{
+    position:relative;width:100%;height:min(72vh,560px);min-height:380px;
+    border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#0b0e14;
+  }
+  #view{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+  #view:active{cursor:grabbing}
+  #hud{
+    position:absolute;top:0;left:0;right:0;display:flex;gap:.45rem;
+    padding:.6rem;background:linear-gradient(rgba(8,10,16,.72),rgba(8,10,16,0));
+  }
+  #prompt{
+    flex:1;min-width:0;padding:.55rem .7rem;font-size:.95rem;border-radius:4px;
+    border:1px solid rgba(255,255,255,.25);background:rgba(10,12,20,.72);color:#f2f2f2;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  #prompt::placeholder{color:#8b93a5}
+  #go{
+    padding:.55rem .95rem;font-size:.9rem;border:0;border-radius:4px;cursor:pointer;
+    background:var(--accent);color:#fff;font-family:inherit;
+  }
+  #go:active{transform:translateY(1px)}
+  #chips{
+    position:absolute;bottom:.55rem;left:.6rem;right:.6rem;display:flex;gap:.4rem;
+    overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;
+  }
+  #chips::-webkit-scrollbar{display:none}
+  .chip{
+    flex:0 0 auto;font-size:.75rem;padding:.3rem .6rem;border-radius:999px;cursor:pointer;
+    background:rgba(10,12,20,.66);color:#cfd6e4;border:1px solid rgba(255,255,255,.18);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;
+  }
+  .chip:hover{background:rgba(37,71,196,.75);color:#fff}
+  #status{
+    position:absolute;top:3.4rem;left:.7rem;font-size:.72rem;color:#9fb0cc;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;pointer-events:none;
+    text-shadow:0 1px 2px rgba(0,0,0,.6);white-space:pre-line;
+  }
+  #help{
+    position:absolute;bottom:2.6rem;right:.7rem;font-size:.7rem;color:#8b93a5;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;pointer-events:none;
+    text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:right;
+  }
+  .kbd{font-family:ui-monospace,Menlo,monospace;background:#f0f0ee;border:1px solid var(--line);border-radius:3px;padding:0 .3em;font-size:.85em}
+  .meth li{margin:.45rem 0}
+  footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.8rem;color:var(--muted);text-align:center}
+  @media (max-width:560px){
+    h1{font-size:1.6rem}
+    #stage{height:62vh}
+  }
+</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}
+</script>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Dream Engine</h1>
+    <p class="subtitle">Prompt-conditioned synthesis of explorable 3D worlds in a single forward pass</p>
+    <p class="authors">J. Garcia<sup>1</sup> &nbsp; <span class="affil"><sup>1</sup>Institute of General Acceleration, Chicago</span></p>
+  </header>
+
+  <section>
+    <h2>Abstract</h2>
+    <p>We present Dream Engine, a world model that maps free-form natural language directly to a
+    navigable three-dimensional environment. Given a single sentence, the model infers terrain
+    topology, hydrology, vegetation, settlement density, and illumination, then decodes the scene in
+    one pass at interactive frame rates. No precomputed assets are used; every world is sampled from
+    the prompt's latent seed, so the same description always dreams the same world. The system runs
+    entirely in the browser.</p>
+  </section>
+
+  <section>
+    <h2>Interactive demo</h2>
+    <div id="stage">
+      <canvas id="view"></canvas>
+      <div id="hud">
+        <input id="prompt" autocomplete="off" spellcheck="false"
+               placeholder="describe a world... e.g. a frozen ocean under two moons"/>
+        <button id="go">Generate</button>
+      </div>
+      <div id="status"></div>
+      <div id="help"></div>
+      <div id="chips"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Method</h2>
+    <ol class="meth">
+      <li><b>Prompt encoding.</b> The description is hashed into a 32-bit latent seed and scanned for
+      semantic tokens (hydrology, biome, settlement, sky state, palette) that condition the decoder.</li>
+      <li><b>Latent terrain.</b> A seeded fractal noise field is sampled over a 128&times;128 height
+      grid; amplitude and roughness are set by the inferred biome.</li>
+      <li><b>Scene decoding.</b> Water, vegetation, rock, and structures are instanced onto the
+      heightfield under the inferred lighting, and the world is streamed to a first-person renderer.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Limitations</h2>
+    <p>Dream Engine is a world model in the literal sense: it models worlds. It has never seen one.
+    Geology is impressionistic, architecture is optimistic, and the model refuses all responsibility
+    for worlds described as &ldquo;cursed&rdquo;. Worlds containing two or more moons are decoded at
+    the visitor's own risk.</p>
+  </section>
+
+  <footer>Dream Engine &middot; sampled locally, dreams included &middot; 2026</footer>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ---------- seeded randomness ---------- */
+function xmur3(str){
+  let h = 1779033703 ^ str.length;
+  for(let i=0;i<str.length;i++){
+    h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+    h = (h<<13) | (h>>>19);
+  }
+  return function(){
+    h = Math.imul(h ^ (h>>>16), 2246822507);
+    h = Math.imul(h ^ (h>>>13), 3266489909);
+    return (h ^= h>>>16) >>> 0;
+  };
+}
+function mulberry32(a){
+  return function(){
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ (t>>>15), t|1);
+    t ^= t + Math.imul(t ^ (t>>>7), t|61);
+    return ((t ^ (t>>>14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- seeded value noise ---------- */
+function makeNoise(rand){
+  const vals = new Float32Array(256*256);
+  for(let i=0;i<vals.length;i++) vals[i]=rand();
+  const at=(x,y)=>vals[((y&255)<<8)|(x&255)];
+  return function(x,y){
+    const xi=Math.floor(x), yi=Math.floor(y);
+    const xf=x-xi, yf=y-yi;
+    const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
+    return at(xi,yi)*(1-u)*(1-v) + at(xi+1,yi)*u*(1-v) + at(xi,yi+1)*(1-u)*v + at(xi+1,yi+1)*u*v;
+  };
+}
+function makeFbm(noise){
+  return function(x,y,oct){
+    let a=0.5, f=1, s=0, n=0;
+    for(let i=0;i<oct;i++){ s += a*noise(x*f,y*f); n+=a; a*=0.5; f*=2.03; }
+    return s/n;
+  };
+}
+
+/* ---------- prompt parsing ---------- */
+function parsePrompt(text){
+  const t = ' ' + text.toLowerCase() + ' ';
+  const has=(...ws)=>ws.some(w=>t.includes(w));
+  const cfg = {
+    amp: 7, freq: 0.012, octaves: 4,
+    waterLevel: -999, waterColor: '#3a7ca5',
+    colLow: '#5d7d49', colMid: '#7d9a58', colHigh: '#9aa06a', colRock:'#7c7c78', colSnow:null,
+    sky: 0x9fc8e8, fog: 0xa9c6da, fogDensity: 0.0055,
+    sunColor: 0xfff1d8, sunInt: 1.35, hemiSky: 0xbfd9ee, hemiGround: 0x54604a, hemiInt: 0.75,
+    trees: 240, rocks: 70, buildings: 0, clouds: 0,
+    treeColor: '#3c6b34', treeColor2: '#59823f', trunkColor: '#6b4a2f',
+    night: false, stars: false, neon: false, moons: 0, floatIslands: 0
+  };
+
+  if(has('ocean','sea','lake','water','river','beach','island','coast','bay','lagoon','swamp')){
+    cfg.waterLevel = 2.2;
+    cfg.colLow='#c9b489'; cfg.colMid='#6f9a5a'; cfg.colHigh='#8aa268';
+  }
+  if(has('ocean','sea')){ cfg.waterLevel = 3.4; cfg.amp = 10; }
+  if(has('desert','dune','sand','sahara','canyon','mesa')){
+    cfg.colLow='#c9a35f'; cfg.colMid='#d9b56f'; cfg.colHigh='#e0c184'; cfg.colRock='#a8865c';
+    cfg.trees=6; cfg.rocks=110; cfg.waterLevel=-999;
+    cfg.sky=0xcfe2ee; cfg.fog=0xe6d3a8;
+  }
+  if(has('forest','woods','jungle','trees','grove','pine','redwood')){
+    cfg.trees=520; cfg.freq=0.014;
+    if(has('jungle')){ cfg.treeColor='#2e6b2e'; cfg.treeColor2='#4d8a3a'; cfg.sky=0xa8d8c0; cfg.fog=0xa9cdb4; }
+  }
+  if(has('mountain','alps','peak','snow','glacier','summit','himalaya')){
+    cfg.amp=22; cfg.freq=0.016; cfg.colSnow='#f4f6f8';
+    cfg.colLow='#5f7052'; cfg.colMid='#7d8a6d'; cfg.colRock='#8a8a86';
+    cfg.sky=0xaacfe8; cfg.fog=0xc4d6e4;
+    if(has('snow','glacier')) cfg.trees=90;
+  }
+  if(has('city','urban','town','metropolis','cyberpunk','tokyo','skyscraper','downtown')){
+    cfg.buildings=170; cfg.trees=20; cfg.rocks=8; cfg.amp=2.2; cfg.freq=0.010;
+    cfg.colLow='#5a5f63'; cfg.colMid='#6b7074'; cfg.colHigh='#7a7f83'; cfg.colRock='#82868a';
+    cfg.sky=0x8fb2cc; cfg.fog=0x9db4c4;
+  }
+  if(has('volcano','lava','magma','inferno','ember')){
+    cfg.colLow='#2a2226'; cfg.colMid='#3a2c28'; cfg.colHigh='#52352a'; cfg.colRock='#1c1719';
+    cfg.sky=0x1d1210; cfg.fog=0x38180f; cfg.fogDensity=0.010;
+    cfg.sunColor=0xff7a33; cfg.sunInt=0.9; cfg.hemiSky=0x662411; cfg.hemiGround=0x1c0f0c;
+    cfg.trees=0; cfg.rocks=160; cfg.amp=16; cfg.waterLevel=1.4; cfg.waterColor='#ff5a1f';
+  }
+  if(has('frozen','ice','arctic','antarctic','tundra','glacier')){
+    cfg.colLow='#c8d8e2'; cfg.colMid='#dde9f0'; cfg.colHigh='#f2f7fa'; cfg.colRock='#9fb2bd';
+    cfg.colSnow='#ffffff'; cfg.trees=14; cfg.waterColor='#7fb8d8';
+    cfg.sky=0xc4dcec; cfg.fog=0xd6e6ef;
+    if(cfg.waterLevel<-900) cfg.waterLevel=1.6;
+  }
+  if(has('night','midnight','moon','star','dark','nocturn')){
+    cfg.night=true; cfg.stars=true;
+    cfg.sky=0x0a1024; cfg.fog=0x0c1326; cfg.fogDensity=0.0075;
+    cfg.sunColor=0xb9c8ff; cfg.sunInt=0.5; cfg.hemiSky=0x2a3a66; cfg.hemiGround=0x0c1018; cfg.hemiInt=0.5;
+    cfg.moons=1;
+  }
+  if(has('sunset','dusk','dawn','golden','sunrise')){
+    cfg.sky=0xf0a05c; cfg.fog=0xe89a6a;
+    cfg.sunColor=0xffb066; cfg.sunInt=1.5; cfg.hemiSky=0xf0b083; cfg.hemiGround=0x5a4a3c;
+  }
+  if(has('neon','cyberpunk','synthwave','vaporwave')){
+    cfg.neon=true; cfg.night=true; cfg.stars=true;
+    cfg.sky=0x0d0618; cfg.fog=0x1a0b2e; cfg.fogDensity=0.010;
+    cfg.sunColor=0xff4fd8; cfg.sunInt=0.85; cfg.hemiSky=0x3a1a66; cfg.hemiGround=0x0d0618;
+    cfg.colLow='#241a38'; cfg.colMid='#32244c'; cfg.colHigh='#3f2d5e'; cfg.colRock='#1c1430';
+    if(cfg.buildings===0) cfg.buildings=150;
+  }
+  if(has('alien','mars','planet','space','lunar','moonscape','exoplanet')){
+    cfg.colLow='#a34a2e'; cfg.colMid='#c06038'; cfg.colHigh='#d47a48'; cfg.colRock='#7a3a26';
+    cfg.sky=0xe8a880; cfg.fog=0xd8906a; cfg.trees=0; cfg.rocks=200;
+    cfg.sunColor=0xffe0c0; cfg.stars=true;
+  }
+  if(has('candy','sweet','pastel','cotton candy','bubblegum')){
+    cfg.colLow='#f0a8c8'; cfg.colMid='#f7c8dc'; cfg.colHigh='#fce0ec'; cfg.colRock='#e08ab4';
+    cfg.treeColor='#8ad8b0'; cfg.treeColor2='#a8e8c8'; cfg.trunkColor='#c88ab0';
+    cfg.sky=0xbfe0f7; cfg.fog=0xf0d8e8;
+  }
+  if(has('meadow','plains','field','prairie','pasture')){
+    cfg.amp=3; cfg.colLow='#6f9a4a'; cfg.colMid='#8ab058'; cfg.colHigh='#a4c06a'; cfg.trees=40;
+  }
+  if(has('cloud','sky','floating','flying islands')){
+    cfg.clouds=26;
+    if(has('floating')) cfg.floatIslands=12;
+  }
+  if(has('two moons','twin moons')) cfg.moons=2;
+  if(has('three moons')) cfg.moons=3;
+  if(cfg.moons>0){ cfg.stars=true; }
+  if(has('fog','mist','misty','foggy','haze')){
+    cfg.fogDensity=0.018;
+  }
+  return cfg;
+}
+
+/* ---------- renderer setup ---------- */
+const canvas = document.getElementById('view');
+const stage  = document.getElementById('stage');
+const statusEl = document.getElementById('status');
+const helpEl = document.getElementById('help');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 900);
+camera.rotation.order = 'YXZ';
+
+function resize(){
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w/h; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+resize();
+
+/* ---------- world state ---------- */
+let world = null;          // THREE.Group holding current world
+let heightAt = ()=>0;      // terrain height sampler
+let waterY = -999;
+const NEON = [0xff2fd6, 0x27e0ff, 0xffe14f, 0x7dff5a, 0xff6a3d, 0xb44fff];
+
+function disposeWorld(){
+  if(!world) return;
+  world.traverse(o=>{
+    if(o.geometry) o.geometry.dispose();
+    if(o.material){ (Array.isArray(o.material)?o.material:[o.material]).forEach(m=>m.dispose()); }
+  });
+  scene.remove(world);
+  world = null;
+}
+
+function buildWorld(promptText){
+  const t0 = performance.now();
+  disposeWorld();
+  const seedFn = xmur3(promptText || 'dream');
+  const seed = seedFn();
+  const rand = mulberry32(seed);
+  const noise = makeNoise(mulberry32(seed ^ 0x9e3779b9));
+  const fbm = makeFbm(noise);
+  const cfg = parsePrompt(promptText);
+  const SIZE = 220, SEG = 128;
+
+  scene.background = new THREE.Color(cfg.sky);
+  scene.fog = new THREE.FogExp2(cfg.fog, cfg.fogDensity);
+
+  world = new THREE.Group();
+  scene.add(world);
+
+  /* lights */
+  const hemi = new THREE.HemisphereLight(cfg.hemiSky, cfg.hemiGround, cfg.hemiInt);
+  world.add(hemi);
+  const sun = new THREE.DirectionalLight(cfg.sunColor, cfg.sunInt);
+  sun.position.set(60, 90, 30);
+  world.add(sun);
+
+  /* terrain */
+  const H = (x,z)=>{
+    const base = fbm(x*cfg.freq+31.7, z*cfg.freq+11.3, cfg.octaves);
+    return (base-0.42) * cfg.amp * 2.2;
+  };
+  heightAt = H;
+  waterY = cfg.waterLevel;
+
+  const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+  geo.rotateX(-Math.PI/2);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count*3);
+  const cLow=new THREE.Color(cfg.colLow), cMid=new THREE.Color(cfg.colMid),
+        cHigh=new THREE.Color(cfg.colHigh), cRock=new THREE.Color(cfg.colRock),
+        cSnow=cfg.colSnow?new THREE.Color(cfg.colSnow):null;
+  const snowLine = cfg.amp*0.55;
+  const tmp = new THREE.Color();
+  for(let i=0;i<pos.count;i++){
+    const x=pos.getX(i), z=pos.getZ(i);
+    const h=H(x,z);
+    pos.setY(i,h);
+    const t = THREE.MathUtils.clamp((h+cfg.amp)/(cfg.amp*1.6), 0, 1);
+    if(t<0.5) tmp.lerpColors(cLow,cMid,t*2); else tmp.lerpColors(cMid,cHigh,(t-0.5)*2);
+    const steep = Math.abs(H(x+1.5,z)-h)+Math.abs(H(x,z+1.5)-h);
+    if(steep>1.6) tmp.lerp(cRock, Math.min(1,(steep-1.6)/2));
+    if(cSnow && h>snowLine) tmp.lerp(cSnow, Math.min(1,(h-snowLine)/4));
+    tmp.offsetHSL(0,0,(rand()-0.5)*0.02);
+    colors[i*3]=tmp.r; colors[i*3+1]=tmp.g; colors[i*3+2]=tmp.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors,3));
+  geo.computeVertexNormals();
+  const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({vertexColors:true}));
+  world.add(terrain);
+
+  /* water */
+  if(cfg.waterLevel>-900){
+    const wgeo = new THREE.PlaneGeometry(SIZE*1.4, SIZE*1.4, 1, 1);
+    wgeo.rotateX(-Math.PI/2);
+    const lava = cfg.waterColor.toLowerCase()==='#ff5a1f';
+    const wmat = new THREE.MeshLambertMaterial({
+      color: cfg.waterColor, transparent: !lava, opacity: lava?1:0.78,
+      emissive: lava?0xff3a00:0x000000, emissiveIntensity: lava?0.9:0
+    });
+    const water = new THREE.Mesh(wgeo, wmat);
+    water.position.y = cfg.waterLevel;
+    world.add(water);
+  }
+
+  /* helper to scatter */
+  const clearOf=(x,z,margin)=>{ const h=H(x,z); return h> (cfg.waterLevel>-900?cfg.waterLevel+margin:-999); };
+
+  /* trees */
+  if(cfg.trees>0){
+    const trunkG = new THREE.CylinderGeometry(0.16,0.24,1.6,5);
+    const leafG  = new THREE.ConeGeometry(1.25,3.2,6);
+    const trunks = new THREE.InstancedMesh(trunkG, new THREE.MeshLambertMaterial({color:cfg.trunkColor}), cfg.trees);
+    const leaves = new THREE.InstancedMesh(leafG, new THREE.MeshLambertMaterial({color:0xffffff}), cfg.trees);
+    const m=new THREE.Matrix4(), q=new THREE.Quaternion(), s=new THREE.Vector3(), p=new THREE.Vector3();
+    const c1=new THREE.Color(cfg.treeColor), c2=new THREE.Color(cfg.treeColor2), cc=new THREE.Color();
+    let placed=0, guard=0;
+    while(placed<cfg.trees && guard++<cfg.trees*40){
+      const x=(rand()-0.5)*SIZE*0.92, z=(rand()-0.5)*SIZE*0.92;
+      const h=H(x,z);
+      if(!clearOf(x,z,0.5)) continue;
+      if(cSnow && h>snowLine) continue;
+      const sc=0.7+rand()*0.9;
+      p.set(x,h+0.8*sc,z); s.set(sc,sc,sc);
+      q.setFromAxisAngle(new THREE.Vector3(0,1,0), rand()*Math.PI*2);
+      m.compose(p,q,s); trunks.setMatrixAt(placed,m);
+      p.y=h+(0.8+1.9)*sc; m.compose(p,q,s); leaves.setMatrixAt(placed,m);
+      cc.lerpColors(c1,c2,rand());
+      leaves.setColorAt(placed,cc);
+      placed++;
+    }
+    trunks.count=placed; leaves.count=placed;
+    world.add(trunks); world.add(leaves);
+  }
+
+  /* rocks */
+  if(cfg.rocks>0){
+    const rockG = new THREE.DodecahedronGeometry(0.8,0);
+    const rocks = new THREE.InstancedMesh(rockG, new THREE.MeshLambertMaterial({color:cfg.colRock}), cfg.rocks);
+    const m=new THREE.Matrix4(), q=new THREE.Quaternion(), e=new THREE.Euler(), s=new THREE.Vector3(), p=new THREE.Vector3();
+    let placed=0, guard=0;
+    while(placed<cfg.rocks && guard++<cfg.rocks*40){
+      const x=(rand()-0.5)*SIZE*0.95, z=(rand()-0.5)*SIZE*0.95;
+      const h=H(x,z);
+      if(!clearOf(x,z,-0.5)) continue;
+      const sc=0.4+rand()*1.6;
+      p.set(x,h+0.2*sc,z); s.set(sc,sc*(0.6+rand()*0.6),sc);
+      e.set(rand()*0.6,rand()*Math.PI*2,rand()*0.6); q.setFromEuler(e);
+      m.compose(p,q,s); rocks.setMatrixAt(placed,m);
+      placed++;
+    }
+    rocks.count=placed;
+    world.add(rocks);
+  }
+
+  /* buildings */
+  if(cfg.buildings>0){
+    const bg = new THREE.BoxGeometry(1,1,1);
+    bg.translate(0,0.5,0);
+    const bmat = cfg.neon
+      ? new THREE.MeshBasicMaterial({color:0xffffff})
+      : new THREE.MeshLambertMaterial({color:0xffffff});
+    const b = new THREE.InstancedMesh(bg, bmat, cfg.buildings);
+    const m=new THREE.Matrix4(), q=new THREE.Quaternion(), s=new THREE.Vector3(), p=new THREE.Vector3();
+    const cc=new THREE.Color();
+    let placed=0, guard=0;
+    while(placed<cfg.buildings && guard++<cfg.buildings*50){
+      const a=rand()*Math.PI*2, r=Math.pow(rand(),0.6)*SIZE*0.34;
+      const x=Math.cos(a)*r, z=Math.sin(a)*r;
+      const h=H(x,z);
+      if(!clearOf(x,z,0.3)) continue;
+      if(Math.hypot(x, z-34) < 15) continue; // keep the spawn clearing open
+      const w=2+rand()*3, d=2+rand()*3, bh=3+Math.pow(rand(),2)*26*(1-r/(SIZE*0.4));
+      p.set(x,h-0.3,z); s.set(w,bh,d);
+      q.setFromAxisAngle(new THREE.Vector3(0,1,0), Math.floor(rand()*4)*Math.PI/2);
+      m.compose(p,q,s); b.setMatrixAt(placed,m);
+      if(cfg.neon) cc.setHex(NEON[Math.floor(rand()*NEON.length)]);
+      else cc.setHSL(0.58, 0.05+rand()*0.08, cfg.night?0.25+rand()*0.2:0.4+rand()*0.25);
+      b.setColorAt(placed,cc);
+      placed++;
+    }
+    b.count=placed;
+    world.add(b);
+  }
+
+  /* clouds */
+  if(cfg.clouds>0){
+    const cg=new THREE.SphereGeometry(4,7,5);
+    const cm=new THREE.MeshLambertMaterial({color:0xffffff, transparent:true, opacity:0.75});
+    const cl=new THREE.InstancedMesh(cg,cm,cfg.clouds);
+    const m=new THREE.Matrix4(), q=new THREE.Quaternion(), s=new THREE.Vector3(), p=new THREE.Vector3();
+    for(let i=0;i<cfg.clouds;i++){
+      p.set((rand()-0.5)*SIZE, 26+rand()*18, (rand()-0.5)*SIZE);
+      s.set(1+rand()*1.6, 0.5+rand()*0.3, 1+rand());
+      m.compose(p,q,s); cl.setMatrixAt(i,m);
+    }
+    world.add(cl);
+  }
+
+  /* floating islands */
+  if(cfg.floatIslands>0){
+    const fg=new THREE.ConeGeometry(3,4,7); fg.rotateX(Math.PI);
+    const fm=new THREE.MeshLambertMaterial({color:cfg.colMid});
+    const fi=new THREE.InstancedMesh(fg,fm,cfg.floatIslands);
+    const tg=new THREE.CylinderGeometry(2.6,2.9,0.8,7);
+    const tm=new THREE.MeshLambertMaterial({color:cfg.colLow});
+    const ti=new THREE.InstancedMesh(tg,tm,cfg.floatIslands);
+    const m=new THREE.Matrix4(), q=new THREE.Quaternion(), s=new THREE.Vector3(), p=new THREE.Vector3();
+    for(let i=0;i<cfg.floatIslands;i++){
+      const x=(rand()-0.5)*SIZE*0.7, z=(rand()-0.5)*SIZE*0.7, y=18+rand()*16;
+      const sc=0.8+rand()*1.8;
+      p.set(x,y,z); s.set(sc,sc,sc);
+      q.setFromAxisAngle(new THREE.Vector3(0,1,0),rand()*Math.PI*2);
+      m.compose(p,q,s); fi.setMatrixAt(i,m);
+      p.y=y+2.2*sc; m.compose(p,q,s); ti.setMatrixAt(i,m);
+    }
+    world.add(fi); world.add(ti);
+  }
+
+  /* stars */
+  if(cfg.stars){
+    const n=900, sp=new Float32Array(n*3);
+    for(let i=0;i<n;i++){
+      const a=rand()*Math.PI*2, ph=rand()*Math.PI*0.5, r=700;
+      sp[i*3]=Math.cos(a)*Math.cos(ph)*r; sp[i*3+1]=Math.sin(ph)*r+20; sp[i*3+2]=Math.sin(a)*Math.cos(ph)*r;
+    }
+    const sg=new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.BufferAttribute(sp,3));
+    const stars=new THREE.Points(sg, new THREE.PointsMaterial({color:0xffffff, size:1.6, sizeAttenuation:false, fog:false}));
+    world.add(stars);
+  }
+
+  /* moons */
+  for(let i=0;i<cfg.moons;i++){
+    const moon=new THREE.Mesh(
+      new THREE.SphereGeometry(14-i*3, 18, 14),
+      new THREE.MeshBasicMaterial({color: i===0?0xe8ecf4:0xd8c8e8, fog:false})
+    );
+    moon.position.set(160+i*90, 120+i*40, -420+i*60);
+    world.add(moon);
+  }
+
+  const ms = (performance.now()-t0).toFixed(0);
+  statusEl.textContent = 'run 0x'+seed.toString(16).padStart(8,'0')+'\ndecode '+ms+' ms · grid '+SEG+'\u00d7'+SEG+' · assets 0';
+  return cfg;
+}
+
+/* ---------- first-person controls ---------- */
+const pos = new THREE.Vector3(0, 8, 34);
+let yaw = 0, pitch = -0.12;
+const keys = {};
+addEventListener('keydown', e=>{ keys[e.key.toLowerCase()]=true; });
+addEventListener('keyup',   e=>{ keys[e.key.toLowerCase()]=false; });
+
+const pointers = new Map(); // id -> {mode, x0,y0, x,y}
+canvas.addEventListener('pointerdown', e=>{
+  canvas.setPointerCapture(e.pointerId);
+  const r = canvas.getBoundingClientRect();
+  const isTouch = e.pointerType !== 'mouse';
+  const mode = (isTouch && (e.clientX-r.left) < r.width*0.42) ? 'stick' : 'look';
+  pointers.set(e.pointerId, {mode, x0:e.clientX, y0:e.clientY, x:e.clientX, y:e.clientY});
+});
+canvas.addEventListener('pointermove', e=>{
+  const pt = pointers.get(e.pointerId);
+  if(!pt) return;
+  if(pt.mode==='look'){
+    yaw   -= (e.clientX-pt.x)*0.0045;
+    pitch -= (e.clientY-pt.y)*0.0045;
+    pitch = THREE.MathUtils.clamp(pitch, -1.45, 1.45);
+  }
+  pt.x=e.clientX; pt.y=e.clientY;
+});
+const drop = e=>pointers.delete(e.pointerId);
+canvas.addEventListener('pointerup', drop);
+canvas.addEventListener('pointercancel', drop);
+
+/* virtual stick drawing */
+const stickEl = document.createElement('div');
+stickEl.style.cssText='position:absolute;width:84px;height:84px;border:2px solid rgba(255,255,255,.4);border-radius:50%;display:none;pointer-events:none';
+const nubEl = document.createElement('div');
+nubEl.style.cssText='position:absolute;width:30px;height:30px;background:rgba(255,255,255,.55);border-radius:50%;display:none;pointer-events:none';
+stage.appendChild(stickEl); stage.appendChild(nubEl);
+
+/* ---------- main loop ---------- */
+const clock = new THREE.Clock();
+function tick(){
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  let fwd=0, str=0;
+  if(keys['w']||keys['arrowup']) fwd+=1;
+  if(keys['s']||keys['arrowdown']) fwd-=1;
+  if(keys['a']||keys['arrowleft']) str-=1;
+  if(keys['d']||keys['arrowright']) str+=1;
+
+  let stick=null;
+  for(const pt of pointers.values()) if(pt.mode==='stick') stick=pt;
+  if(stick){
+    const dx=(stick.x-stick.x0)/46, dy=(stick.y-stick.y0)/46;
+    str += THREE.MathUtils.clamp(dx,-1,1);
+    fwd += THREE.MathUtils.clamp(-dy,-1,1);
+    const r=canvas.getBoundingClientRect();
+    stickEl.style.display=nubEl.style.display='block';
+    stickEl.style.left=(stick.x0-r.left-42)+'px'; stickEl.style.top=(stick.y0-r.top-42)+'px';
+    nubEl.style.left=(stick.x-r.left-15)+'px';  nubEl.style.top=(stick.y-r.top-15)+'px';
+  } else {
+    stickEl.style.display=nubEl.style.display='none';
+  }
+
+  const speed = keys['shift'] ? 26 : 13;
+  const f = new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw));
+  const rv = new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw));
+  pos.addScaledVector(f, fwd*speed*dt);
+  pos.addScaledVector(rv, str*speed*dt);
+  pos.x = THREE.MathUtils.clamp(pos.x,-104,104);
+  pos.z = THREE.MathUtils.clamp(pos.z,-104,104);
+
+  const ground = Math.max(heightAt(pos.x,pos.z)+1.7, waterY>-900?waterY+0.6:-999);
+  pos.y += (ground - pos.y)*Math.min(1, dt*8);
+
+  camera.position.copy(pos);
+  camera.rotation.set(pitch, yaw, 0);
+  renderer.render(scene, camera);
+}
+tick();
+
+/* ---------- UI wiring ---------- */
+const EXAMPLES = [
+  'a neon city at night in the rain',
+  'a quiet pine forest by a lake at dawn',
+  'red desert mesas under a burning sunset',
+  'a frozen ocean under two moons',
+  'floating islands above the clouds',
+  'a candy meadow with pastel hills',
+  'volcanic badlands with rivers of lava',
+  'an alien jungle on a distant exoplanet',
+  'snowy mountain peaks above the treeline'
+];
+const chipsEl = document.getElementById('chips');
+for(const ex of EXAMPLES){
+  const b=document.createElement('button');
+  b.className='chip'; b.textContent=ex;
+  b.onclick=()=>{ document.getElementById('prompt').value=ex; generate(ex); };
+  chipsEl.appendChild(b);
+}
+const isTouch = matchMedia('(pointer: coarse)').matches;
+helpEl.textContent = isTouch ? 'left thumb: move · right thumb: look' : 'drag: look · WASD / arrows: move · shift: run';
+
+const promptEl = document.getElementById('prompt');
+function generate(text){
+  const q = (text||'').trim() || 'an untitled dream';
+  buildWorld(q);
+  pos.set(0, heightAt(0,34)+1.7, 34);
+  yaw=0; pitch=-0.1;
+}
+document.getElementById('go').onclick = ()=>generate(promptEl.value);
+promptEl.addEventListener('keydown', e=>{ if(e.key==='Enter'){ generate(promptEl.value); e.stopPropagation(); }});
+
+generate('a quiet pine forest by a lake at dawn');
+promptEl.value = 'a quiet pine forest by a lake at dawn';
+</script>
+</body>
+</html>
